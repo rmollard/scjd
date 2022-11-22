@@ -1,0 +1,7 @@
+Platform: Windows XP Professional (version 5.1.2600) with service pack 2
+Java version: 1.5.0_01-b08
+
+
+
+
+

@@ -1,0 +1,295 @@
+-----------------
+Developer Choices
+-----------------
+
+
+Program architecture
+--------------------
+
+I decided that the client/standalone and server modes are sufficiently
+different to warrant two separate Model/View/Controller systems.
+This approach makes the standalone implementation easy, since standalone
+mode is essentially the client and server modes running together, but
+only displaying the client GUI.
+
+The client and standalone user interfaces are almost identical, so
+it made sense to use one view for both of these modes, and have
+conditional code for the parts where they differ.
+
+The requirements state that the user interface should be designed
+with future functionality enhancements in mind, and should
+not disrupt users when this occurs.
+To this end, the search form on the client GUI is dynamically generated based
+on the schema sent by the server.
+Therefore the client user does not have to upgrade
+to a new version of the program whenever 
+there is a minor change to the database file
+format, such as adding a new field or making a field editable or searchable.
+Using reflection and dynamic code downloading could make this mechanism even
+more flexible, but the requirements 
+explicitly forbid any dynamic code downloading.
+
+The requirements also state that URLyBird only take bookings for rooms
+within 48 hours of the start of room occupancy. 
+Several posts on the www.javaranch.com forum claimed that automatic
+failure could result from not enforcing this rule.
+Adding a "bookable" flag to each
+record does not provide a reliable solution since the record could become
+bookable or unbookable as time passes. 
+Another option would be to have the client
+ask the server if the record is bookable whenever a record is selected.
+This would increase the amount of network traffic and could introduce a time
+delay that would prove annoying for the user.
+
+For the user's convenience,
+the client program calculates if a record may
+be booked by estimating the server's
+current time. This calculation is very fast since it does not
+require any network communication.
+
+
+Graphical User Interface
+------------------------
+
+I decided to implement sorting functionality for the search results
+table, since this functionality would be expected by most users and
+there is a huge amount of information on the Internet about
+how to implement it.
+
+I also decided to localize all strings displayed in the GUI because
+having all the strings in a .properties file made them very easy to
+change during development, and also makes the program more portable.
+
+
+DBMain interface implementation
+-------------------------------
+
+The requirements state that the data access class must implement
+the DBMain interface. I interpreted that to mean that the interface
+is to be implemented "as is", without adding any more methods or
+changing method signatures. Technically, if Data.java implemented
+any subclass of DBMain it would still be implementing DBMain, but
+I did not want to run the risk of an automatic failure.
+
+The awkward method signatures in DBMain cause some complications
+to the server code, due to the need to convert field values and
+search criteria into strings and then parse them back again.
+
+Adding additional exceptions to the DBMain methods could be
+accomplished by creating subclasses of the declared exception (usually
+RecordNotFoundException), adding unchecked exceptions, or chaining
+another exception to the RecordNotFoundException.
+Subclassing the declared exception would often lead to misleading
+code, for example throwing a subclass of RecordNotFoundException
+to indicate that the record could not be modified because the
+client does not hold a lock for the record, even though the
+record was in fact found.
+Exception chaining would be slightly more elegant, but would
+still lead to misleading code because the "wrong" exception type would
+be thrown.
+Using unchecked exceptions has the disadvantage that dealing with
+the exception is not enforced by the compiler, but is still marginally
+more elegant than the other solutions.
+For these reasons I decided to use unchecked exceptions, with one
+exception class for each type of possible problem.
+It would also have been feasible to wrap all of the possible
+original checked exceptions in a general purpose unchecked exception,
+which would reduce the number of exception classes
+but make the exception handling code slightly more complex.
+
+The "create" method in DBMain declares that it throws DuplicateKeyException,
+but the Data implementation does not actually throw it. This is because
+identical records may represent different hotel rooms in the same hotel, since
+there is no "room number" field.
+Note that the "update" method may modify a record to be identical to
+another record, although it does not throw DuplicateKeyException.
+I added a JavaDoc comment reserving the right to throw an
+IllegalArgumentException in the future to cover this case.
+
+The methods in my Data class are synchronized, so they will still behave
+correctly if the Data client is multithreaded. Without synchronization,
+the program's behavior would be unpredictable. For example, when
+performing a concurrent "read" and "lock" operation, the timestamp checking
+part of the "lock" might execute before the "read" had updated the timestamp,
+causing the "lock" to fail.
+
+
+Database locking system
+-----------------------
+
+Making fields and records immutable means that all field and record
+instances are always thread safe, simplifying the implementation.
+
+I spent a lot of time designing the record locking system, and eventually
+decided to use a concurrent map to store the records (and their locks).
+Read locks are not required with this design, since records are immutable and
+the concurrent map allows simultaneous changes without throwing a
+ConcurrentModificationException.
+This approach has the potential to allow multiple concurrent 
+reads and writes, assuming the
+writes are to different records. The file writing process is currently
+performed sequentially.
+Storing a copy of the records in memory reduces the amount of
+file I/O required since reading and searching can be performed
+without the need to read the file.
+
+I assumed that the speed of operations such as searches would be
+more important than minimizing memory usage on the server.
+
+I considered using Multi-Version Concurrency Control, but decided that
+simply storing the latest version of each record would suffice.
+Using Multi-Version Concurrency Control would ensure that a client's view of
+the database is consistent, at the cost of returning stale records.
+It is easier just to store the latest version of each record.
+This has the disadvantage of breaking the "Isolation" database property.
+For example, suppose we are performing a search (looking at each
+record in turn starting from 0) and are up to record 50.
+If record 10 is changed, then record 70 is changed, we will pick
+up the change to record 70
+but not record 10, and therefore will see a view of the database
+that never actually existed.
+
+The advantage is that, on average, the records will be newer,
+reducing the chance that
+a booking request will fail. It also simplifies the implementation, since we
+only store the latest version of each record, instead of any version that might
+be needed by a currently executing request.
+
+The actual locking is performed on the server side. Exposing the lock and unlock
+functionality to clients would be inelegant and introduce the possibility
+of an inconsiderate client locking records and not releasing them.
+
+Deadlock is avoided by having the server side code unlock the record 
+after the record is updated. This eliminates the "Hold and Wait" condition
+that is necessary for a deadlock to occur.
+
+Concurrent modification can easily be detected by
+maintaining a set of timestamps
+for each client. The client timestamp is updated whenever the client encounters
+the record, for example during a read or update. If this timestamp is older
+than the record's actual timestamp, the record must have been modified
+without the knowledge of the client.
+
+
+Identifying database clients
+----------------------------
+
+The method signatures in DBMain did not provide any way to identify which
+client invoked the method. The only elegant solution to this problem
+that I could think of was to have one Data instance for each client, and
+thereby identify clients based on their Data objects.
+
+I considered using a unique number for each network client, but this
+was unnecessary since the Data object reference is sufficient to
+uniquely identify a client.
+
+
+RMI or socket networking
+------------------------
+
+Using sockets has the potential to reduce the amount of data sent over
+the network, improving performance. 
+RMI generally requires a smaller amount of code to implement and is
+easier to understand, but requires transferred objects to be serializable and
+does not offer the low level control offered by sockets.
+
+The requirements state that a simple design is preferred over a complex one,
+even if the complex design is more efficient.
+
+For these reasons, I chose to use RMI for networking.
+
+I assumed that there would not be an RMI registry running on
+port 1099 when the server is started.
+
+
+Database file format and parsing
+--------------------------------
+
+The requirements document says that strings in the database file
+should be padded with nulls, 
+but in the file they are padded with spaces.
+I decided to follow the requirements and pad strings with nulls.
+When reading strings, I trim the leading and trailing whitespace off,
+assuming it to be insignificant.
+
+The main file parsing class uses a number of smaller parsers,
+one for each field type. This makes the main file parser easy to
+modify, and enables us to reuse the small
+parsers for the search form and the record modification form.
+It also makes it easy to validate the contents of the database file.
+
+
+Database table schema
+---------------------
+
+To avoid having to hard code the database schema, the schema is
+sent to each client by the server. If the file format changes, for example
+by adding another field, the program will handle the change automatically. 
+The URLyBird file format does not explicitly give the type of each field,
+and whether the field can be modified,
+so it was necessary to define this meta-data somewhere. I initially
+defined it in a .java file, but then changed to a .properties file
+so that I could modify it for testing without recompiling any code.
+It was decided to use the .properties file instead of an XML file because
+the .properties format is easier to understand and modify,
+and it also simplifies the schema reading code somewhat.
+
+
+Search algorithm
+----------------
+
+There are several possible ways to implement the search functionality.
+For example, the server could send all the records to each client,
+and broadcast changes as they occur. 
+The client would then search its own local set of records.
+This could reduce the total network traffic if searches were common and record
+modifications were rare. 
+Also the chance of a client's copy of a record becoming out of date is reduced.
+A simpler option would be to have the server
+send back a list of matching records
+for each search request. The "find" method in the DBMain interface seems to
+imply that this is the expected approach.
+I decided to implement this option because the requirements state that a simpler
+design is preferred, and it makes the client GUI slightly easier to code.
+
+The DBMain interface's "find" method returns an array of matching record
+numbers, but the records could be modified by another client so it is
+necessary to read each matching record to ensure that it still matches.
+If this check was not performed, the search results table might contain
+records that do not match the search criteria.
+
+
+Documentation
+-------------
+
+I was not sure whether or not a default constructor would be considered
+part of the "public interface" of a class, so I added an empty public
+constructor to several classes so that I could add JavaDoc comments to it.
+
+The requirements state that JavaDoc documentation must be provided
+for all classes and interfaces, so I decided to run JavaDoc with
+the -package option so that documentation would be generated
+for classes that have default visibility.
+I did not generate JavaDoc documentation for
+the private members or private inner classes because these are not
+visible to users of the classes.
+
+The help system could be online or offline. Offline help has the advantage
+that the program does not have to be running in order to view it.
+I decided to use online help however because is more convenient
+for the user, and there is no risk of it
+becoming lost since it is integrated into the program.
+If there is a minor problem, such as an invalid command line
+argument, the GUI is still displayed so the help will still be available.
+
+Ideally online and offline help would be provided, but the requirements state
+that the documentation must be in one format, so I thought providing online
+and offline help would be to risk automatic failure.
+
+
+
+
+
+
+
+
